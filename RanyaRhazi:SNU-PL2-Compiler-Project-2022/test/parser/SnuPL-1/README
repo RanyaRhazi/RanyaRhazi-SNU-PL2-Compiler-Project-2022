@@ -1,0 +1,5 @@
+test01.mod: simple arithmetic expressions
+test02.mod: simple arithmetic expressions with parentheses
+test03.mod: arithmetic and relational expressions
+
+error01.mod: lexically correct but syntactically wrong

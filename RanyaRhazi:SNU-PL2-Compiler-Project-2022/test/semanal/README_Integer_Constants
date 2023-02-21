@@ -1,0 +1,144 @@
+Parsing of Large Negative Integer Constants
+===========================================
+
+The parsing of MIN_INT / MIN_LLONG  is tricky because, according to the SnuPL/2 grammar,  the minus (-) in front 
+of a constant is not part of the number but a separate grammar element. 
+
+Consider the parse tree for "-5"
+
+       simpleexpr
+       /      |
+     "-"    term
+              |
+            factor
+              |
+            number
+              |
+              5
+
+This leads to problems when checking for integer bounds because abs(MIN_INT) > abs(MAX_INT). When parsing 
+MIN_INT = -2147483648, the conversion of "2147483648" will cause an integer overflow during type checking 
+because the value is larger than MAX_INT. The same applies to long integers.
+
+In the following, we discuss three approaches to deal with this.
+
+
+Strict implementation of SnuPL/2 EBNF
+-------------------------------------
+A strict implementation does not perform folding of negation and constants. Since 'number' accepts only positive 
+numbers, there is no way to directly represent MIN_INT.
+
+
+This is implemented by the file test_semanal.strict
+
+If you choose to implement this variant, test your compiler with test/semanal/int_const_strict.mod
+
+A strict implementation does not fold the minus sign in front of a constant. Since 'number' accepts only positive 
+numbers, there is no way to directly represent MIN_INT; the programmers have to write an expression that computes 
+MIN_INT. For example:
+
+  minint = -2147483647 - 1;
+
+If you choose to implement this variant, test your compiler with `test/semanal/int_const_strict.mod`.
+
+
+
+Simple constant folding
+-----------------------
+A simple workaround to allow MIN_INT is to fold the leading minus sign with the following term if the term is a 
+constant. In the implementation of the 'simpleexpr' production, we check whether the 'term' production was 
+preceeded by a minus operator. If so and the 'term' node is of type 'CAstConstant' and an integer type, we 
+negate the value of the constant.
+
+This is a slighly inaccurate interpretation of the SnuPL/2 grammar and leads to unintuitive behavior since 
+"-MIN_INT + ..." is accepted, but "-MIN_INT * ..." is not. 
+
+To understand why consider the parse trees
+
+    -2147483648 + 5                       -2147483648 * 5
+
+       simpleexpr                            simpleexpr
+     /   |     |   \                         /        \
+   "-"  term  "+"  term                    "-"       term
+         |          |                              /   |   \
+       factor     factor                      factor  "*"  factor
+         |          |                           |             |
+       number     number                      number       number
+         |          |                           |             |
+    2147483648      5                      2147483648         5
+
+The corresponding ASTs are shown below. In the left case, the first term is represented by an CAstConstant node 
+which can be easily folded with the "-" sign to its left. In case of a multiplication, however, the (first) term 
+is of type CAstBinaryOp and cannot be folded.
+
+       simpleexpr                            simpleexpr
+     /   |     |   \                         /       \
+   "-"  term  "+"  term                    "-"      term
+      (of type)  (of type)                        (of type)
+    CAstConstant CAstConstant                    CAstBinaryOp
+                                                 /     |     \
+         ^                                    factor  "*"  factor
+         |                                  (of type)     (of type)
+fold "-" w/ CAstConstant                  CAstConstant   CAstConstant
+
+If you choose this implementation, test your compiler with test/semanal/int_const_simple.mod
+
+
+
+Relaxed constant folding
+------------------------
+This variant folds the negation operator with an immediately following constant.
+
+Relaxed constant folding improves the unintuitive behavior of simple constant folding by also folding integer 
+constants if they appears as the leftmost leaf in the `term` expression following the preceeding unary minus 
+operator in simpleexpr.  I.e., for the parse trees from above
+
+    -2147483648 + 5                       -2147483648 * 5
+
+       simpleexpr                            simpleexpr
+     /   |     |   \                         /        \
+   "-"  term  "+"  term                    "-"       term
+         |          |                              /   |   \
+       factor     factor                      factor  "*"  factor
+         |          |                           |             |
+       number     number                      number       number
+         |          |                           |             |
+    2147483648      5                      2147483648         5
+
+we first identify the leftmost leaf in the first term and fold if it is a CAstConstant:
+
+       simpleexpr                            simpleexpr
+     /   |     |   \                         /        \
+   "-"  term  "+"  term                    "-"       term
+     (of type)    (of type)                        (of type)
+   CAstConstant  CAstConstant                     CAstBinaryOp
+         ^                                       /     |     \
+         |                                  factor    "*"    factor
+   fold "-" w/ CAstConstant               (of type)         (of type)
+                                        CAstConstant       CAstConstant
+                                              ^
+                                              |
+                                        fold "-" w/ CAstConstant
+
+This approach causes another problem: the AST does not retain any information about parentheses in expressions. 
+We can thus not blindly fold unary minus operators followed by a CAstConstant leaf node because we would then 
+wrongly accept expressions such as 
+
+    i := -(2147483648 + 5)
+
+or even worse (b is of boolean type here)
+
+    b := -(1 > 0)
+
+
+The workaround is to keep some information about parentheses in the AST. The SnuPL/2 compiler does not represent 
+parentheses as explicit nodes in the AST; instead, it adds a "parenthesized" flag to the CAstExpression class. 
+The parser needs to set this flag, and during type checking, we stop the folding operation at the first node that 
+has the flag set.
+
+A test program for this variant is provided in test/semanal/int_const_relaxed.mod
+
+
+
+Note that despite all this, negative constants that do not appear at the beginning of a simpleexpr are still 
+not supported an constitute a syntax error.
